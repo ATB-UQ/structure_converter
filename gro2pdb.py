@@ -1,4 +1,6 @@
 import sys
+
+import argparse
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,11 +24,19 @@ def add_res_atom_numbers(gro_lines):
             raise Exception("Residue numbers not sequential:\n  {}\n  {}".format(gro_lines[i - 1], gro_lines[i]))
 
 
+def is_int(x):
+    try:
+        int(x)
+        return True
+    except:
+        return False
+
+
 def read_gro(gro_file):
     def nm_to_A(x):
         return float(x)*10.
     columns = (
-        ("res_num", (None, 5, int)),
+        ("res_num", (0, 5, int)),
         ("res_name", (5, 9, str)),
         ("atom_name", (9, 15, str)),
         ("atom_num", (15, 20, int)),
@@ -39,10 +49,13 @@ def read_gro(gro_file):
     )
 
     def parse_gro_line(l):
-        return dict([(name, formatter(l[start:end].strip())) for name, (start, end, formatter) in columns])
+        return dict([
+            (name, formatter(l[start:end].strip())) for name, (start, end, formatter) in columns
+            if start < len(l.strip())# this condition allows gro files without velocities to be converted
+        ])
 
     with open(gro_file, "r") as fh:
-        gro_lines = [parse_gro_line(l) for l in fh.read().splitlines() if not l.startswith(";") and len(l.split()) > 7]
+        gro_lines = [parse_gro_line(l) for l in fh.read().splitlines() if not l.startswith(";") and len(l.split()) > 5 and is_int(l[:5])]
     add_res_atom_numbers(gro_lines)
     return gro_lines
 
@@ -71,7 +84,7 @@ def read_itp(itp_file):
          if not l.startswith(";") and len(l.split()) > 7
          ]
     )
-    assert len(set([l["res_id"] for l in atom_lines.values()])) == 1, "ITP file contains multiple res_id values"
+    #assert len(set([l["res_id"] for l in atom_lines.values()])) == 1, "ITP file contains multiple res_id values"
     return atom_lines[1]["res_id"], atom_lines
 
 
@@ -79,7 +92,7 @@ def read_itp_files(itp_files):
     return dict([read_itp(f) for f in itp_files])
 
 
-def gen_pdb(gro_lines, itp_dict):
+def gen_pdb(gro_lines, itp_dict, match_on_index=False):
     def pdb_line(index, name, residue_name, residue_number, x, y, z, element):
         return PDB_TEMPLATE.format(
             'ATOM  ',
@@ -99,6 +112,14 @@ def gen_pdb(gro_lines, itp_dict):
 
     pdb_lines = []
     for l in gro_lines:
+        if match_on_index:
+            atom_type = itp_dict[
+                gro_lines[0]["res_name"]][l["atom_num"]
+            ]["atom_type"]
+        else:
+            atom_type = itp_dict[
+                l["res_name"]][l["res_atom_number"]
+            ]["atom_type"]
         pdb_lines.append(
             pdb_line(
                 l["atom_num"],
@@ -108,18 +129,40 @@ def gen_pdb(gro_lines, itp_dict):
                 l["x"],
                 l["y"],
                 l["z"],
-                LJ_TYPE_FOR_ELEMENT[ itp_dict[l["res_name"]][l["res_atom_number"]]["atom_type"] ],
+                LJ_TYPE_FOR_ELEMENT[atom_type],
             )
         )
     return pdb_lines
 
 
-def main(gro_file, itp_files):
+def parse_args():
+    argparser = argparse.ArgumentParser(description='Convert GRO format to PDB')
+    argparser.add_argument('-g', '--gro_file', required=True,
+                           help="GRO file.",
+                           )
+    argparser.add_argument('-f', '--itp_files', required=True, type=str, nargs='+',
+                           help="GROMACS ITP file.",
+                           )
+    argparser.add_argument('-i', '--index_based_matching', required=False, action="store_true", default=False,
+                           help="Match GRO and ITP files only on atom index rather than index in residue.",
+                           )
+
+    args = argparser.parse_args()
+    return args.gro_file, args.itp_files, args.index_based_matching
+
+
+def run(gro_file, itp_files, match_on_index=False):
     gro_lines = read_gro(gro_file)
     itp_dict = read_itp_files(itp_files)
-    pdb_lines = gen_pdb(gro_lines, itp_dict)
+    pdb_lines = gen_pdb(gro_lines, itp_dict, match_on_index=match_on_index)
+    return pdb_lines
+
+
+def main():
+    gro_file, itp_files, match_on_index = parse_args()
+    pdb_lines = run(gro_file, itp_files, match_on_index=match_on_index)
     print("\n".join(pdb_lines))
 
 
 if __name__ == '__main__':
-    main(sys.argv[1], sys.argv[2:])
+    main()
